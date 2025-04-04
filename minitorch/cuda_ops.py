@@ -10,20 +10,9 @@ from .tensor_data import (
     Storage,
     Strides,
     TensorData,
-    broadcast_index,
-    index_to_position,
-    shape_broadcast,
-    to_index,
 )
 from .tensor_ops import MapProto, TensorOps
 
-# This code will CUDA compile fast versions your tensor_data functions.
-# If you get an error, read the docs for NUMBA as to what is allowed
-# in these functions.
-
-to_index = cuda.jit(device=True)(to_index)
-index_to_position = cuda.jit(device=True)(index_to_position)
-broadcast_index = cuda.jit(device=True)(broadcast_index)
 
 THREADS_PER_BLOCK = 32
 
@@ -53,7 +42,22 @@ class CudaOps(TensorOps):
         f = tensor_zip(cuda.jit(device=True)(fn))
 
         def ret(a: Tensor, b: Tensor) -> Tensor:
-            c_shape = shape_broadcast(a.shape, b.shape)
+            m = max(len(a.shape), len(b.shape))
+            c_rev = [0] * m
+            a_rev = list(reversed(a.shape))
+            b_rev = list(reversed(b.shape))
+            for i in range(m):
+                if i >= len(a.shape):
+                    c_rev[i] = b_rev[i]
+                elif i >= len(b.shape):
+                    c_rev[i] = a_rev[i]
+                else:
+                    c_rev[i] = max(a_rev[i], b_rev[i])
+                    if a_rev[i] != c_rev[i] and a_rev[i] != 1:
+                        raise IndexingError(f"Broadcast failure {a.shape} {b.shape}")
+                    if b_rev[i] != c_rev[i] and b_rev[i] != 1:
+                        raise IndexingError(f"Broadcast failure {a.shape} {b.shape}")
+            c_shape = tuple(reversed(c_rev))
             out = a.zeros(c_shape)
             threadsperblock = THREADS_PER_BLOCK
             blockspergrid = (out.size + (threadsperblock - 1)) // threadsperblock
@@ -97,7 +101,23 @@ class CudaOps(TensorOps):
             both_2d += 1
         both_2d = both_2d == 2
 
-        ls = list(shape_broadcast(a.shape[:-2], b.shape[:-2]))
+        a_s, b_s = a.shape[:-2], b.shape[:-2]
+        m = max(len(a_s), len(b_s))
+        c_rev = [0] * m
+        a_rev = list(reversed(a_s))
+        b_rev = list(reversed(b_s))
+        for i in range(m):
+            if i >= len(a_s):
+                c_rev[i] = b_rev[i]
+            elif i >= len(b_s):
+                c_rev[i] = a_rev[i]
+            else:
+                c_rev[i] = max(a_rev[i], b_rev[i])
+                if a_rev[i] != c_rev[i] and a_rev[i] != 1:
+                    raise RuntimeError(f"indexing error: Broadcast failure {a_s} {b_s}")
+                if b_rev[i] != c_rev[i] and b_rev[i] != 1:
+                    raise RuntimeError(f"indexing error: Broadcast failure {a_s} {b_s}")
+        ls = list(reversed(c_rev))
         ls.append(a.shape[-2])
         ls.append(b.shape[-1])
         assert a.shape[-1] == b.shape[-2]
@@ -155,10 +175,22 @@ def tensor_map(
         i = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
         # ASSIGN3.3
         if i < out_size:
-            to_index(i, out_shape, out_index)
-            broadcast_index(out_index, out_shape, in_shape, in_index)
-            o = index_to_position(out_index, out_strides)
-            j = index_to_position(in_index, in_strides)
+            cur_ord = i + 0
+            for i in range(len(out_shape) - 1, -1, -1):
+                sh = out_shape[i]
+                out_index[i] = int(cur_ord % sh)
+                cur_ord = cur_ord // sh
+            for s_i, s in enumerate(in_shape):
+                if s > 1:
+                    in_index[s_i] = out_index[s_i + (len(out_shape) - len(in_shape))]
+                else:
+                    in_index[s_i] = 0
+            o = 0
+            for ind, stride in zip(out_index, out_strides):
+                o += ind * stride
+            j = 0
+            for ind, stride in zip(in_index, in_strides):
+                j += ind * stride
             out[o] = fn(in_storage[j])
         # END ASSIGN3.3
 
@@ -200,18 +232,36 @@ def tensor_zip(
         a_index = cuda.local.array(MAX_DIMS, numba.int32)
         b_index = cuda.local.array(MAX_DIMS, numba.int32)
         i = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
-
+        
         # ASSIGN3.3
         if i < out_size:
-            to_index(i, out_shape, out_index)
-            o = index_to_position(out_index, out_strides)
-            broadcast_index(out_index, out_shape, a_shape, a_index)
-            j = index_to_position(a_index, a_strides)
-            broadcast_index(out_index, out_shape, b_shape, b_index)
-            k = index_to_position(b_index, b_strides)
+            cur_ord = i + 0
+            for i in range(len(out_shape) - 1, -1, -1):
+                sh = out_shape[i]
+                out_index[i] = int(cur_ord % sh)
+                cur_ord = cur_ord // sh
+            o = 0
+            for ind, stride in zip(out_index, out_strides):
+                o += ind * stride
+            for s_i, s in enumerate(a_shape):
+                if s > 1:
+                    a_index[s_i] = out_index[s_i + (len(out_shape) - len(a_shape))]
+                else:
+                    a_index[s_i] = 0
+            j = 0
+            for ind, stride in zip(a_index, a_strides):
+                j += ind * stride
+            for s_i, s in enumerate(b_shape):
+                if s > 1:
+                    b_index[s_i] = out_index[s_i + (len(out_shape) - len(b_shape))]
+                else:
+                    b_index[s_i] = 0
+
+            k = 0
+            for ind, stride in zip(b_index, b_strides):
+                k += ind * stride
             out[o] = fn(a_storage[j], b_storage[k])
         # END ASSIGN3.3
-
 
     return cuda.jit()(_zip)  # type: ignore
 
@@ -242,7 +292,7 @@ def _sum_practice(out: Storage, a: Storage, size: int) -> None:
     cache = cuda.shared.array(BLOCK_DIM, numba.float64)
     i = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
     pos = cuda.threadIdx.x
-
+    
     # ASSIGN3.3
     if i < size:
         val = float(a[i])
@@ -310,13 +360,24 @@ def tensor_reduce(
         # ASSIGN3.3
         cache[pos] = reduce_value
         if out_pos < out_size:
-            to_index(out_pos, out_shape, out_index)
-            o = index_to_position(out_index, out_strides)
+            # to_index(out_pos, out_shape, out_index)
+            cur_ord = out_pos + 0
+            for i in range(len(out_shape) - 1, -1, -1):
+                sh = out_shape[i]
+                out_index[i] = int(cur_ord % sh)
+                cur_ord = cur_ord // sh
+            # o = index_to_position(out_index, out_strides)
+            o = 0
+            for ind, stride in zip(out_index, out_strides):
+                o += ind * stride
             # Now we know where we are going. (haven't used thread)
 
             out_index[reduce_dim] = out_index[reduce_dim] * BLOCK_DIM + pos
             if out_index[reduce_dim] < a_shape[reduce_dim]:
-                in_a = index_to_position(out_index, a_strides)
+                # in_a = index_to_position(out_index, a_strides)
+                in_a = 0
+                for ind, stride in zip(out_index, a_strides):
+                    in_a += ind * stride
                 cache[pos] = a_storage[in_a]
                 cuda.syncthreads()
                 x = 0
@@ -329,7 +390,6 @@ def tensor_reduce(
             if pos == 0:
                 out[o] = cache[0]
         # END ASSIGN3.3
-
 
     return cuda.jit()(_reduce)  # type: ignore
 
@@ -443,8 +503,8 @@ def _tensor_matrix_multiply(
     # The final position c[i, j]
     i = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
     j = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
-
-    # The local position in the block.
+    
+    # The local position in the block. 
     pi = cuda.threadIdx.x
     pj = cuda.threadIdx.y
 
@@ -452,7 +512,7 @@ def _tensor_matrix_multiply(
     # 1) Move across shared dimension by block dim.
     #    a) Copy into shared memory for a matrix.
     #    b) Copy into shared memory for b matrix
-    #    c) Compute the dot produce for position c[i, j]
+    #    c) Compute the dot produce for position c[i, j] 
     # ASSIGN3.4
     accum = 0.0
     for k_start in range(0, a_shape[2], BLOCK_DIM):
@@ -475,5 +535,6 @@ def _tensor_matrix_multiply(
     if i < out_shape[1] and j < out_shape[2]:
         out[out_strides[0] * batch + out_strides[1] * i + out_strides[2] * j] = accum
     # END ASSIGN3.4
+
 
 tensor_matrix_multiply = cuda.jit(_tensor_matrix_multiply)

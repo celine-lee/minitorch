@@ -14,11 +14,6 @@ from .operators import prod
 MAX_DIMS = 32
 
 
-class IndexingError(RuntimeError):
-    "Exception raised for indexing errors."
-    pass
-
-
 Storage: TypeAlias = npt.NDArray[np.float64]
 OutIndex: TypeAlias = npt.NDArray[np.int32]
 Index: TypeAlias = npt.NDArray[np.int32]
@@ -29,112 +24,6 @@ UserIndex: TypeAlias = Sequence[int]
 UserShape: TypeAlias = Sequence[int]
 UserStrides: TypeAlias = Sequence[int]
 
-
-def index_to_position(index: Index, strides: Strides) -> int:
-    """
-    Converts a multidimensional tensor `index` into a single-dimensional position in
-    storage based on strides.
-
-    Args:
-        index : index tuple of ints
-        strides : tensor strides
-
-    Returns:
-        Position in storage
-    """
-
-    # ASSIGN2.1
-    position = 0
-    for ind, stride in zip(index, strides):
-        position += ind * stride
-    return position
-    # END ASSIGN2.1
-
-
-def to_index(ordinal: int, shape: Shape, out_index: OutIndex) -> None:
-    """
-    Convert an `ordinal` to an index in the `shape`.
-    Should ensure that enumerating position 0 ... size of a
-    tensor produces every index exactly once. It
-    may not be the inverse of `index_to_position`.
-
-    Args:
-        ordinal: ordinal position to convert.
-        shape : tensor shape.
-        out_index : return index corresponding to position.
-
-    """
-    # ASSIGN2.1
-    cur_ord = ordinal + 0
-    for i in range(len(shape) - 1, -1, -1):
-        sh = shape[i]
-        out_index[i] = int(cur_ord % sh)
-        cur_ord = cur_ord // sh
-    # END ASSIGN2.1
-
-
-def broadcast_index(
-    big_index: Index, big_shape: Shape, shape: Shape, out_index: OutIndex
-) -> None:
-    """
-    Convert a `big_index` into `big_shape` to a smaller `out_index`
-    into `shape` following broadcasting rules. In this case
-    it may be larger or with more dimensions than the `shape`
-    given. Additional dimensions may need to be mapped to 0 or
-    removed.
-
-    Args:
-        big_index : multidimensional index of bigger tensor
-        big_shape : tensor shape of bigger tensor
-        shape : tensor shape of smaller tensor
-        out_index : multidimensional index of smaller tensor
-
-    Returns:
-        None
-    """
-    # ASSIGN2.2
-    for i, s in enumerate(shape):
-        if s > 1:
-            out_index[i] = big_index[i + (len(big_shape) - len(shape))]
-        else:
-            out_index[i] = 0
-    return None
-    # END ASSIGN2.2
-
-
-def shape_broadcast(shape1: UserShape, shape2: UserShape) -> UserShape:
-    """
-    Broadcast two shapes to create a new union shape.
-
-    Args:
-        shape1 : first shape
-        shape2 : second shape
-
-    Returns:
-        broadcasted shape
-
-    Raises:
-        IndexingError : if cannot broadcast
-    """
-    # ASSIGN2.2
-    a, b = shape1, shape2
-    m = max(len(a), len(b))
-    c_rev = [0] * m
-    a_rev = list(reversed(a))
-    b_rev = list(reversed(b))
-    for i in range(m):
-        if i >= len(a):
-            c_rev[i] = b_rev[i]
-        elif i >= len(b):
-            c_rev[i] = a_rev[i]
-        else:
-            c_rev[i] = max(a_rev[i], b_rev[i])
-            if a_rev[i] != c_rev[i] and a_rev[i] != 1:
-                raise IndexingError(f"Broadcast failure {a} {b}")
-            if b_rev[i] != c_rev[i] and b_rev[i] != 1:
-                raise IndexingError(f"Broadcast failure {a} {b}")
-    return tuple(reversed(c_rev))
-    # END ASSIGN2.2
 
 
 
@@ -172,7 +61,7 @@ class TensorData:
         assert isinstance(strides, tuple), "Strides must be tuple"
         assert isinstance(shape, tuple), "Shape must be tuple"
         if len(strides) != len(shape):
-            raise IndexingError(f"Len of strides {strides} must match {shape}.")
+            raise RuntimeError(f"Indexing Error: Len of strides {strides} must match {shape}.")
         self._strides = array(strides)
         self._shape = array(shape)
         self.strides = strides
@@ -201,7 +90,22 @@ class TensorData:
 
     @staticmethod
     def shape_broadcast(shape_a: UserShape, shape_b: UserShape) -> UserShape:
-        return shape_broadcast(shape_a, shape_b)
+        m = max(len(shape_a), len(shape_b))
+        c_rev = [0] * m
+        a_rev = list(reversed(shape_a))
+        b_rev = list(reversed(shape_b))
+        for i in range(m):
+            if i >= len(shape_a):
+                c_rev[i] = b_rev[i]
+            elif i >= len(shape_b):
+                c_rev[i] = a_rev[i]
+            else:
+                c_rev[i] = max(a_rev[i], b_rev[i])
+                if a_rev[i] != c_rev[i] and a_rev[i] != 1:
+                    raise RuntimeError(f"Indexing Error: Broadcast failure {shape_a} {shape_b}")
+                if b_rev[i] != c_rev[i] and b_rev[i] != 1:
+                    raise RuntimeError(f"Indexing Error: Broadcast failure {shape_a} {shape_b}")
+        return tuple(reversed(c_rev))
 
     def index(self, index: Union[int, UserIndex]) -> int:
         if isinstance(index, int):
@@ -216,21 +120,28 @@ class TensorData:
 
         # Check for errors
         if aindex.shape[0] != len(self.shape):
-            raise IndexingError(f"Index {aindex} must be size of {self.shape}.")
+            raise RuntimeError(f"Indexing Error: Index {aindex} must be size of {self.shape}.")
         for i, ind in enumerate(aindex):
             if ind >= self.shape[i]:
-                raise IndexingError(f"Index {aindex} out of range {self.shape}.")
+                raise RuntimeError(f"Indexing Error: Index {aindex} out of range {self.shape}.")
             if ind < 0:
-                raise IndexingError(f"Negative indexing for {aindex} not supported.")
+                raise RuntimeError(f"Indexing Error: Negative indexing for {aindex} not supported.")
 
         # Call fast indexing.
-        return index_to_position(array(index), self._strides)
+        position = 0
+        for ind, stride in zip(array(index), self._strides):
+            position += ind * stride
+        return position
 
     def indices(self) -> Iterable[UserIndex]:
         lshape: Shape = array(self.shape)
         out_index: Index = array(self.shape)
         for i in range(self.size):
-            to_index(i, lshape, out_index)
+            cur_ord = i
+            for idx in range(len(lshape) - 1, -1, -1):
+                sh = lshape[idx]
+                out_index[idx] = int(cur_ord % sh)
+                cur_ord = cur_ord // sh
             yield tuple(out_index)
 
     def sample(self) -> UserIndex:

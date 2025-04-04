@@ -10,18 +10,8 @@ from .tensor_data import (
     Index,
     Shape,
     Strides,
-    broadcast_index,
-    index_to_position,
-    to_index,
 )
 from .tensor_functions import Function
-
-# This code will JIT compile fast versions your tensor_data functions.
-# If you get an error, read the docs for NUMBA as to what is allowed
-# in these functions.
-to_index = njit(inline="always")(to_index)
-index_to_position = njit(inline="always")(index_to_position)
-broadcast_index = njit(inline="always")(broadcast_index)
 
 
 def _tensor_conv1d(
@@ -83,8 +73,14 @@ def _tensor_conv1d(
     # ASSIGN4.1
     for i in prange(out_size):
         out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        to_index(i, out_shape, out_index)
-        o = index_to_position(out_index, out_strides)
+        cur_ord = i + 0
+        for idx in range(len(out_shape) - 1, -1, -1):
+            sh = out_shape[idx]
+            out_index[idx] = int(cur_ord % sh)
+            cur_ord = cur_ord // sh
+        o = 0
+        for ind, stride in zip(out_index, out_strides):
+            o += ind * stride
 
         # Iterate over batch, out_channel, width
         b, oc, w = out_index[:3]
@@ -104,7 +100,6 @@ def _tensor_conv1d(
                 term2 = weight[s2[0] * oc + s2[1] * ic + s2[2] * dw]
                 out[o] += term1 * term2
     # END ASSIGN4.1
-
 
 
 tensor_conv1d = njit(parallel=True)(_tensor_conv1d)
@@ -232,8 +227,15 @@ def _tensor_conv2d(
     # ASSIGN4.2
     for i in prange(out_size):
         out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        to_index(i, out_shape, out_index)
-        o = index_to_position(out_index, out_strides)
+        cur_ord = i + 0
+        for idx in range(len(out_shape) - 1, -1, -1):
+            sh = out_shape[idx]
+            out_index[idx] = int(cur_ord % sh)
+            cur_ord = cur_ord // sh
+        o = 0
+        for ind, stride in zip(out_index, out_strides):
+            o += ind * stride
+
         b, oc, h, w = out_index[:4]
         acc = 0.0
         order = 1
@@ -255,7 +257,6 @@ def _tensor_conv2d(
                     inner2 += s21
         out[o] = acc
     # END ASSIGN4.2
-
 
 
 tensor_conv2d = njit(parallel=True, fastmath=True)(_tensor_conv2d)

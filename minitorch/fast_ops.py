@@ -5,13 +5,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
 
-from .tensor_data import (
-    MAX_DIMS,
-    broadcast_index,
-    index_to_position,
-    shape_broadcast,
-    to_index,
-)
+from .tensor_data import MAX_DIMS
 from .tensor_ops import MapProto, TensorOps
 
 if TYPE_CHECKING:
@@ -22,12 +16,6 @@ if TYPE_CHECKING:
 
 # TIP: Use `NUMBA_DISABLE_JIT=1 pytest tests/ -m task3_1` to run these tests without JIT.
 
-# This code will JIT compile fast versions your tensor_data functions.
-# If you get an error, read the docs for NUMBA as to what is allowed
-# in these functions.
-to_index = njit(inline="always")(to_index)
-index_to_position = njit(inline="always")(index_to_position)
-broadcast_index = njit(inline="always")(broadcast_index)
 
 
 class FastOps(TensorOps):
@@ -53,7 +41,22 @@ class FastOps(TensorOps):
         f = tensor_zip(njit()(fn))
 
         def ret(a: Tensor, b: Tensor) -> Tensor:
-            c_shape = shape_broadcast(a.shape, b.shape)
+            m = max(len(a.shape), len(b.shape))
+            c_rev = [0] * m
+            a_rev = list(reversed(a.shape))
+            b_rev = list(reversed(b.shape))
+            for i in range(m):
+                if i >= len(a.shape):
+                    c_rev[i] = b_rev[i]
+                elif i >= len(b.shape):
+                    c_rev[i] = a_rev[i]
+                else:
+                    c_rev[i] = max(a_rev[i], b_rev[i])
+                    if a_rev[i] != c_rev[i] and a_rev[i] != 1:
+                        raise RuntimeError(f"Broadcast failure {a.shape} {b.shape}")
+                    if b_rev[i] != c_rev[i] and b_rev[i] != 1:
+                        raise RuntimeError(f"Broadcast failure {a.shape} {b.shape}")
+            c_shape = tuple(reversed(c_rev))
             out = a.zeros(c_shape)
             f(*out.tuple(), *a.tuple(), *b.tuple())
             return out
@@ -115,7 +118,23 @@ class FastOps(TensorOps):
             both_2d += 1
         both_2d = both_2d == 2
 
-        ls = list(shape_broadcast(a.shape[:-2], b.shape[:-2]))
+        a_shape, b_shape = a.shape[:-2], b.shape[:-2]
+        m = max(len(a_shape), len(b_shape))
+        c_rev = [0] * m
+        a_rev = list(reversed(a_shape))
+        b_rev = list(reversed(b_shape))
+        for i in range(m):
+            if i >= len(a_shape):
+                c_rev[i] = b_rev[i]
+            elif i >= len(b_shape):
+                c_rev[i] = a_rev[i]
+            else:
+                c_rev[i] = max(a_rev[i], b_rev[i])
+                if a_rev[i] != c_rev[i] and a_rev[i] != 1:
+                    raise RuntimeError(f"Indexing Error: Broadcast failure {a_shape} {b_shape}")
+                if b_rev[i] != c_rev[i] and b_rev[i] != 1:
+                    raise RuntimeError(f"Indexing Error: Broadcast failure {a_shape} {b_shape}")
+        ls = list(reversed(c_rev))
         ls.append(a.shape[-2])
         ls.append(b.shape[-1])
         assert a.shape[-1] == b.shape[-2]
@@ -168,10 +187,22 @@ def tensor_map(
             for i in prange(len(out)):
                 out_index: Index = np.empty(MAX_DIMS, np.int32)
                 in_index: Index = np.empty(MAX_DIMS, np.int32)
-                to_index(i, out_shape, out_index)
-                broadcast_index(out_index, out_shape, in_shape, in_index)
-                o = index_to_position(out_index, out_strides)
-                j = index_to_position(in_index, in_strides)
+                cur_ord = i + 0
+                for idx in range(len(out_shape) - 1, -1, -1):
+                    sh = out_shape[idx]
+                    out_index[idx] = int(cur_ord % sh)
+                    cur_ord = cur_ord // sh
+                for idx, s in enumerate(in_shape):
+                    if s > 1:
+                        in_index[idx] = out_index[idx + (len(out_shape) - len(in_shape))]
+                    else:
+                        in_index[idx] = 0
+                o = 0
+                for ind, stride in zip(out_index, out_strides):
+                    o += ind * stride
+                j = 0
+                for ind, stride in zip(in_index, in_strides):
+                    j += ind * stride
                 out[o] = fn(in_storage[j])
         else:
             for i in prange(len(out)):
@@ -227,12 +258,30 @@ def tensor_zip(
                 out_index: Index = np.empty(MAX_DIMS, np.int32)
                 a_index: Index = np.empty(MAX_DIMS, np.int32)
                 b_index: Index = np.empty(MAX_DIMS, np.int32)
-                to_index(i, out_shape, out_index)
-                o = index_to_position(out_index, out_strides)
-                broadcast_index(out_index, out_shape, a_shape, a_index)
-                j = index_to_position(a_index, a_strides)
-                broadcast_index(out_index, out_shape, b_shape, b_index)
-                k = index_to_position(b_index, b_strides)
+                cur_ord = i + 0
+                for idx in range(len(out_shape) - 1, -1, -1):
+                    sh = out_shape[idx]
+                    out_index[idx] = int(cur_ord % sh)
+                    cur_ord = cur_ord // sh
+                o = 0
+                for ind, stride in zip(out_index, out_strides):
+                    o += ind * stride
+                for idx, s in enumerate(a_shape):
+                    if s > 1:
+                        a_index[idx] = out_index[idx + (len(out_shape) - len(a_shape))]
+                    else:
+                        a_index[idx] = 0
+                j = 0
+                for ind, stride in zip(a_index, a_strides):
+                    j += ind * stride
+                for idx, s in enumerate(b_shape):
+                    if s > 1:
+                        b_index[idx] = out_index[idx + (len(out_shape) - len(b_shape))]
+                    else:
+                        b_index[idx] = 0
+                k = 0
+                for ind, stride in zip(b_index, b_strides):
+                    k += ind * stride
                 out[o] = fn(a_storage[j], b_storage[k])
         else:
             for i in prange(len(out)):
@@ -275,10 +324,18 @@ def tensor_reduce(
         for i in prange(len(out)):
             out_index: Index = np.empty(MAX_DIMS, np.int32)
             reduce_size = a_shape[reduce_dim]
-            to_index(i, out_shape, out_index)
-            o = index_to_position(out_index, out_strides)
+            cur_ord = i + 0
+            for idx in range(len(out_shape) - 1, -1, -1):
+                sh = out_shape[idx]
+                out_index[idx] = int(cur_ord % sh)
+                cur_ord = cur_ord // sh
+            o = 0
+            for ind, stride in zip(out_index, out_strides):
+                o += ind * stride
             accum = out[o]
-            j = index_to_position(out_index, a_strides)
+            j = 0
+            for ind, stride in zip(out_index, a_strides):
+                j += ind * stride
             step = a_strides[reduce_dim]
             for s in range(reduce_size):
                 accum = fn(accum, a_storage[j])
