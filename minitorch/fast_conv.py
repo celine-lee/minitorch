@@ -83,16 +83,8 @@ def _tensor_conv1d(
     # ASSIGN4.1
     for i in prange(out_size):
         out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        # to_index(i, out_shape, out_index)
-        cur_ord = i + 0
-        for i in range(len(out_shape) - 1, -1, -1):
-            sh = out_shape[i]
-            out_index[i] = int(cur_ord % sh)
-            cur_ord = cur_ord // sh
-        # o = index_to_position(out_index, out_strides)
-        o = 0
-        for ind, stride in zip(out_index, out_strides):
-            o += ind * stride
+        to_index(i, out_shape, out_index)
+        o = index_to_position(out_index, out_strides)
 
         # Iterate over batch, out_channel, width
         b, oc, w = out_index[:3]
@@ -112,6 +104,7 @@ def _tensor_conv1d(
                 term2 = weight[s2[0] * oc + s2[1] * ic + s2[2] * dw]
                 out[o] += term1 * term2
     # END ASSIGN4.1
+
 
 
 tensor_conv1d = njit(parallel=True)(_tensor_conv1d)
@@ -239,17 +232,8 @@ def _tensor_conv2d(
     # ASSIGN4.2
     for i in prange(out_size):
         out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        # to_index(i, out_shape, out_index)
-        cur_ord = i + 0
-        for i in range(len(out_shape) - 1, -1, -1):
-            sh = out_shape[i]
-            out_index[i] = int(cur_ord % sh)
-            cur_ord = cur_ord // sh
-        # o = index_to_position(out_index, out_strides)
-        o = 0
-        for ind, stride in zip(out_index, out_strides):
-            o += ind * stride
-
+        to_index(i, out_shape, out_index)
+        o = index_to_position(out_index, out_strides)
         b, oc, h, w = out_index[:4]
         acc = 0.0
         order = 1
@@ -271,6 +255,7 @@ def _tensor_conv2d(
                     inner2 += s21
         out[o] = acc
     # END ASSIGN4.2
+
 
 
 tensor_conv2d = njit(parallel=True, fastmath=True)(_tensor_conv2d)

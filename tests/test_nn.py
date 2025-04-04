@@ -31,8 +31,28 @@ def test_avg(t: Tensor) -> None:
 @pytest.mark.task4_4
 @given(tensors(shape=(2, 3, 4)))
 def test_max(t: Tensor) -> None:
-    # TODO: Implement for Task 4.4.
-    raise NotImplementedError('Need to implement for Task 4.4')
+    # ASSIGN4.4
+    t.requires_grad_(True)
+    t2 = t + minitorch.rand((2, 3, 4)) * 1e-6
+    argt2 = minitorch.argmax(t2, 2)
+    v = minitorch.max(t2, minitorch.tensor([2]))
+    v.sum().backward()
+    for i in range(2):
+        for j in range(3):
+            m = -1e9
+            ind = -1
+            for k in range(4):
+                if t2[i, j, k] > m:
+                    m = t2[i, j, k]
+                    ind = k
+
+            assert_close(v[i, j, 0], m)
+            assert t.grad is not None
+            assert t.grad[i, j, ind] == 1.0
+            assert t.grad[i, j, ind] == argt2[i, j, ind]
+            if ind > 0:
+                assert t.grad[i, j, ind - 1] == 0.0
+    # END ASSIGN4.4
 
 
 @pytest.mark.task4_4

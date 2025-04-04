@@ -168,27 +168,16 @@ def tensor_map(
             for i in prange(len(out)):
                 out_index: Index = np.empty(MAX_DIMS, np.int32)
                 in_index: Index = np.empty(MAX_DIMS, np.int32)
-                cur_ord = i + 0
-                for i in range(len(out_shape) - 1, -1, -1):
-                    sh = out_shape[i]
-                    out_index[i] = int(cur_ord % sh)
-                    cur_ord = cur_ord // sh
-                for s_i, s in enumerate(in_shape):
-                    if s > 1:
-                        in_index[s_i] = out_index[s_i + (len(out_shape) - len(in_shape))]
-                    else:
-                        in_index[s_i] = 0
-                o = 0
-                for ind, stride in zip(out_index, out_strides):
-                    o += ind * stride
-                j = 0
-                for ind, stride in zip(in_index, in_strides):
-                    j += ind * stride
+                to_index(i, out_shape, out_index)
+                broadcast_index(out_index, out_shape, in_shape, in_index)
+                o = index_to_position(out_index, out_strides)
+                j = index_to_position(in_index, in_strides)
                 out[o] = fn(in_storage[j])
         else:
             for i in prange(len(out)):
                 out[i] = fn(in_storage[i])
         # END ASSIGN3.1
+
     return njit(parallel=True)(_map)  # type: ignore
 
 
@@ -238,36 +227,18 @@ def tensor_zip(
                 out_index: Index = np.empty(MAX_DIMS, np.int32)
                 a_index: Index = np.empty(MAX_DIMS, np.int32)
                 b_index: Index = np.empty(MAX_DIMS, np.int32)
-                cur_ord = i + 0
-                for i in range(len(out_shape) - 1, -1, -1):
-                    sh = out_shape[i]
-                    out_index[i] = int(cur_ord % sh)
-                    cur_ord = cur_ord // sh
-                o = 0
-                for ind, stride in zip(out_index, out_strides):
-                    o += ind * stride
-                for s_i, s in enumerate(a_shape):
-                    if s > 1:
-                        a_index[s_i] = out_index[s_i + (len(out_shape) - len(a_shape))]
-                    else:
-                        a_index[s_i] = 0
-
-                j = 0
-                for ind, stride in zip(a_index, a_strides):
-                    j += ind * stride
-                for s_i, s in enumerate(b_shape):
-                    if s > 1:
-                        b_index[s_i] = out_index[s_i + (len(out_shape) - len(b_shape))]
-                    else:
-                        b_index[s_i] = 0
-                k = 0
-                for ind, stride in zip(b_index, b_index):
-                    k += ind * stride
+                to_index(i, out_shape, out_index)
+                o = index_to_position(out_index, out_strides)
+                broadcast_index(out_index, out_shape, a_shape, a_index)
+                j = index_to_position(a_index, a_strides)
+                broadcast_index(out_index, out_shape, b_shape, b_index)
+                k = index_to_position(b_index, b_strides)
                 out[o] = fn(a_storage[j], b_storage[k])
         else:
             for i in prange(len(out)):
                 out[i] = fn(a_storage[i], b_storage[i])
         # END ASSIGN3.1
+
 
     return njit(parallel=True)(_zip)  # type: ignore
 
@@ -304,18 +275,10 @@ def tensor_reduce(
         for i in prange(len(out)):
             out_index: Index = np.empty(MAX_DIMS, np.int32)
             reduce_size = a_shape[reduce_dim]
-            cur_ord = i + 0
-            for i in range(len(out_shape) - 1, -1, -1):
-                sh = out_shape[i]
-                out_index[i] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-            o = 0
-            for ind, stride in zip(out_index, out_strides):
-                o += ind * stride
+            to_index(i, out_shape, out_index)
+            o = index_to_position(out_index, out_strides)
             accum = out[o]
-            j = 0
-            for ind, stride in zip(out_index, a_strides):
-                j += ind * stride
+            j = index_to_position(out_index, a_strides)
             step = a_strides[reduce_dim]
             for s in range(reduce_size):
                 accum = fn(accum, a_storage[j])

@@ -155,22 +155,10 @@ def tensor_map(
         i = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
         # ASSIGN3.3
         if i < out_size:
-            cur_ord = i + 0
-            for i in range(len(out_shape) - 1, -1, -1):
-                sh = out_shape[i]
-                out_index[i] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-            for s_i, s in enumerate(in_shape):
-                if s > 1:
-                    in_index[s_i] = out_index[s_i + (len(out_shape) - len(in_shape))]
-                else:
-                    in_index[s_i] = 0
-            o = 0
-            for ind, stride in zip(out_index, out_strides):
-                o += ind * stride
-            j = 0
-            for ind, stride in zip(in_index, in_strides):
-                j += ind * stride
+            to_index(i, out_shape, out_index)
+            broadcast_index(out_index, out_shape, in_shape, in_index)
+            o = index_to_position(out_index, out_strides)
+            j = index_to_position(in_index, in_strides)
             out[o] = fn(in_storage[j])
         # END ASSIGN3.3
 
@@ -215,33 +203,15 @@ def tensor_zip(
 
         # ASSIGN3.3
         if i < out_size:
-            cur_ord = i + 0
-            for i in range(len(out_shape) - 1, -1, -1):
-                sh = out_shape[i]
-                out_index[i] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-            o = 0
-            for ind, stride in zip(out_index, out_strides):
-                o += ind * stride
-            for s_i, s in enumerate(a_shape):
-                if s > 1:
-                    a_index[s_i] = out_index[s_i + (len(out_shape) - len(a_shape))]
-                else:
-                    a_index[s_i] = 0
-            j = 0
-            for ind, stride in zip(a_index, a_strides):
-                j += ind * stride
-            for s_i, s in enumerate(b_shape):
-                if s > 1:
-                    b_index[s_i] = out_index[s_i + (len(out_shape) - len(b_shape))]
-                else:
-                    b_index[s_i] = 0
-
-            k = 0
-            for ind, stride in zip(b_index, b_strides):
-                k += ind * stride
+            to_index(i, out_shape, out_index)
+            o = index_to_position(out_index, out_strides)
+            broadcast_index(out_index, out_shape, a_shape, a_index)
+            j = index_to_position(a_index, a_strides)
+            broadcast_index(out_index, out_shape, b_shape, b_index)
+            k = index_to_position(b_index, b_strides)
             out[o] = fn(a_storage[j], b_storage[k])
         # END ASSIGN3.3
+
 
     return cuda.jit()(_zip)  # type: ignore
 
@@ -340,24 +310,13 @@ def tensor_reduce(
         # ASSIGN3.3
         cache[pos] = reduce_value
         if out_pos < out_size:
-            # to_index(out_pos, out_shape, out_index)
-            cur_ord = out_pos + 0
-            for i in range(len(out_shape) - 1, -1, -1):
-                sh = out_shape[i]
-                out_index[i] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-            # o = index_to_position(out_index, out_strides)
-            o = 0
-            for ind, stride in zip(out_index, out_strides):
-                o += ind * stride
+            to_index(out_pos, out_shape, out_index)
+            o = index_to_position(out_index, out_strides)
             # Now we know where we are going. (haven't used thread)
 
             out_index[reduce_dim] = out_index[reduce_dim] * BLOCK_DIM + pos
             if out_index[reduce_dim] < a_shape[reduce_dim]:
-                # in_a = index_to_position(out_index, a_strides)
-                in_a = 0
-                for ind, stride in zip(out_index, a_strides):
-                    in_a += ind * stride
+                in_a = index_to_position(out_index, a_strides)
                 cache[pos] = a_storage[in_a]
                 cuda.syncthreads()
                 x = 0
