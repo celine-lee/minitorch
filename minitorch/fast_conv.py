@@ -1,3 +1,4 @@
+
 from typing import Tuple
 
 import numpy as np
@@ -5,13 +6,24 @@ from numba import njit, prange
 
 from .autodiff import Context
 from .tensor import Tensor
-from .tensor_data import (
-    MAX_DIMS,
-    Index,
-    Shape,
-    Strides,
-)
+from .tensor_data import MAX_DIMS, Index, Shape, Strides
 from .tensor_functions import Function
+
+
+# Python–level helper functions for index calculations.
+@njit(inline="always")
+def _unravel_index(cur_ord: int, shape: np.ndarray, out_index: np.ndarray) -> None:
+    for idx in range(len(shape) - 1, -1, -1):
+        out_index[idx] = cur_ord % shape[idx]
+        cur_ord //= shape[idx]
+
+
+@njit(inline="always")
+def _ravel_index(index: np.ndarray, strides: np.ndarray, n: int) -> int:
+    pos = 0
+    for i in range(n):
+        pos += index[i] * strides[i]
+    return pos
 
 
 def _tensor_conv1d(
@@ -29,78 +41,32 @@ def _tensor_conv1d(
 ) -> None:
     """
     1D Convolution implementation.
-
-    Given input tensor of
-
-       `batch, in_channels, width`
-
-    and weight tensor
-
-       `out_channels, in_channels, k_width`
-
-    Computes padded output of
-
-       `batch, out_channels, width`
-
-    `reverse` decides if weight is anchored left (False) or right.
-    (See diagrams)
-
-    Args:
-        out (Storage): storage for `out` tensor.
-        out_shape (Shape): shape for `out` tensor.
-        out_strides (Strides): strides for `out` tensor.
-        out_size (int): size of the `out` tensor.
-        input (Storage): storage for `input` tensor.
-        input_shape (Shape): shape for `input` tensor.
-        input_strides (Strides): strides for `input` tensor.
-        weight (Storage): storage for `input` tensor.
-        weight_shape (Shape): shape for `input` tensor.
-        weight_strides (Strides): strides for `input` tensor.
-        reverse (bool): anchor weight at left or right
     """
     batch_, out_channels, out_width = out_shape
     batch, in_channels, width = input_shape
     out_channels_, in_channels_, kw = weight_shape
 
-    assert (
-        batch == batch_
-        and in_channels == in_channels_
-        and out_channels == out_channels_
-    )
+    assert batch == batch_ and in_channels == in_channels_ and out_channels == out_channels_
     s1 = input_strides
     s2 = weight_strides
 
-    # ASSIGN4.1
     for i in prange(out_size):
-        out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        cur_ord = i + 0
-        for idx in range(len(out_shape) - 1, -1, -1):
-            sh = out_shape[idx]
-            out_index[idx] = int(cur_ord % sh)
-            cur_ord = cur_ord // sh
-        o = 0
-        for ind, stride in zip(out_index, out_strides):
-            o += ind * stride
-
-        # Iterate over batch, out_channel, width
-        b, oc, w = out_index[:3]
-
-        # Iterate over weights
+        out_index = np.zeros(MAX_DIMS, np.int16)
+        _unravel_index(i, out_shape, out_index)
+        o = _ravel_index(out_index, out_strides, len(out_shape))
+        b = out_index[0]
+        oc = out_index[1]
+        w_idx = out_index[2]
         for dw in range(kw):
-            iw = w + dw
+            iw = w_idx + dw
             if reverse:
-                iw = w - dw
-            # Skip positions that go off edge.
+                iw = w_idx - dw
             if iw < 0 or iw >= width:
                 continue
-
-            # Reduce over all in_channels
             for ic in range(in_channels):
                 term1 = input[s1[0] * b + s1[1] * ic + s1[2] * iw]
                 term2 = weight[s2[0] * oc + s2[1] * ic + s2[2] * dw]
                 out[o] += term1 * term2
-    # END ASSIGN4.1
-
 
 tensor_conv1d = njit(parallel=True)(_tensor_conv1d)
 
@@ -110,21 +76,11 @@ class Conv1dFun(Function):
     def forward(ctx: Context, input: Tensor, weight: Tensor) -> Tensor:
         """
         Compute a 1D Convolution
-
-        Args:
-            ctx : Context
-            input : batch x in_channel x h x w
-            weight : out_channel x in_channel x kh x kw
-
-        Returns:
-            batch x out_channel x h x w
         """
         ctx.save_for_backward(input, weight)
         batch, in_channels, w = input.shape
         out_channels, in_channels2, kw = weight.shape
         assert in_channels == in_channels2
-
-        # Run convolution
         output = input.zeros((batch, out_channels, w))
         tensor_conv1d(
             *output.tuple(), output.size, *input.tuple(), *weight.tuple(), False
@@ -147,7 +103,6 @@ class Conv1dFun(Function):
             False,
         )
         grad_weight = grad_weight.permute(1, 0, 2)
-
         grad_input = input.zeros((batch, in_channels, w))
         new_weight = weight.permute(1, 0, 2)
         tensor_conv1d(
@@ -158,7 +113,6 @@ class Conv1dFun(Function):
             True,
         )
         return grad_input, grad_weight
-
 
 conv1d = Conv1dFun.apply
 
@@ -178,75 +132,30 @@ def _tensor_conv2d(
 ) -> None:
     """
     2D Convolution implementation.
-
-    Given input tensor of
-
-       `batch, in_channels, height, width`
-
-    and weight tensor
-
-       `out_channels, in_channels, k_height, k_width`
-
-    Computes padded output of
-
-       `batch, out_channels, height, width`
-
-    `Reverse` decides if weight is anchored top-left (False) or bottom-right.
-    (See diagrams)
-
-
-    Args:
-        out (Storage): storage for `out` tensor.
-        out_shape (Shape): shape for `out` tensor.
-        out_strides (Strides): strides for `out` tensor.
-        out_size (int): size of the `out` tensor.
-        input (Storage): storage for `input` tensor.
-        input_shape (Shape): shape for `input` tensor.
-        input_strides (Strides): strides for `input` tensor.
-        weight (Storage): storage for `input` tensor.
-        weight_shape (Shape): shape for `input` tensor.
-        weight_strides (Strides): strides for `input` tensor.
-        reverse (bool): anchor weight at top-left or bottom-right
     """
     batch_, out_channels, _, _ = out_shape
     batch, in_channels, height, width = input_shape
     out_channels_, in_channels_, kh, kw = weight_shape
 
-    assert (
-        batch == batch_
-        and in_channels == in_channels_
-        and out_channels == out_channels_
-    )
-
+    assert batch == batch_ and in_channels == in_channels_ and out_channels == out_channels_
     s1 = input_strides
     s2 = weight_strides
-    # inners
     s10, s11, s12, s13 = s1[0], s1[1], s1[2], s1[3]
     s20, s21, s22, s23 = s2[0], s2[1], s2[2], s2[3]
 
-    # ASSIGN4.2
     for i in prange(out_size):
-        out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        cur_ord = i + 0
-        for idx in range(len(out_shape) - 1, -1, -1):
-            sh = out_shape[idx]
-            out_index[idx] = int(cur_ord % sh)
-            cur_ord = cur_ord // sh
-        o = 0
-        for ind, stride in zip(out_index, out_strides):
-            o += ind * stride
-
-        b, oc, h, w = out_index[:4]
+        out_index = np.zeros(MAX_DIMS, np.int16)
+        _unravel_index(i, out_shape, out_index)
+        o = _ravel_index(out_index, out_strides, len(out_shape))
+        b, oc, h_idx, w_idx = out_index[0], out_index[1], out_index[2], out_index[3]
         acc = 0.0
-        order = 1
-        if reverse:
-            order = -1
+        order = -1 if reverse else 1
         for dh in prange(kh):
-            ih = h + order * dh
+            ih = h_idx + order * dh
             if ih < 0 or ih >= height:
                 continue
             for dw in prange(kw):
-                iw = w + order * dw
+                iw = w_idx + order * dw
                 if iw < 0 or iw >= width:
                     continue
                 inner1 = s10 * b + s12 * ih + s13 * iw
@@ -256,8 +165,6 @@ def _tensor_conv2d(
                     inner1 += s11
                     inner2 += s21
         out[o] = acc
-    # END ASSIGN4.2
-
 
 tensor_conv2d = njit(parallel=True, fastmath=True)(_tensor_conv2d)
 
@@ -267,14 +174,6 @@ class Conv2dFun(Function):
     def forward(ctx: Context, input: Tensor, weight: Tensor) -> Tensor:
         """
         Compute a 2D Convolution
-
-        Args:
-            ctx : Context
-            input : batch x in_channel x h x w
-            weight  : out_channel x in_channel x kh x kw
-
-        Returns:
-            (:class:`Tensor`) : batch x out_channel x h x w
         """
         ctx.save_for_backward(input, weight)
         batch, in_channels, h, w = input.shape
@@ -291,7 +190,6 @@ class Conv2dFun(Function):
         input, weight = ctx.saved_values
         batch, in_channels, h, w = input.shape
         out_channels, in_channels, kh, kw = weight.shape
-
         grad_weight = grad_output.zeros((in_channels, out_channels, kh, kw))
         new_input = input.permute(1, 0, 2, 3)
         new_grad_output = grad_output.permute(1, 0, 2, 3)
@@ -303,7 +201,6 @@ class Conv2dFun(Function):
             False,
         )
         grad_weight = grad_weight.permute(1, 0, 2, 3)
-
         grad_input = input.zeros((batch, in_channels, h, w))
         new_weight = weight.permute(1, 0, 2, 3)
         tensor_conv2d(
@@ -314,6 +211,5 @@ class Conv2dFun(Function):
             True,
         )
         return grad_input, grad_weight
-
 
 conv2d = Conv2dFun.apply
