@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import random
@@ -13,7 +14,6 @@ from .operators import prod
 
 MAX_DIMS = 32
 
-
 Storage: TypeAlias = npt.NDArray[np.float64]
 OutIndex: TypeAlias = npt.NDArray[np.int32]
 Index: TypeAlias = npt.NDArray[np.int32]
@@ -24,9 +24,6 @@ UserIndex: TypeAlias = Sequence[int]
 UserShape: TypeAlias = Sequence[int]
 UserStrides: TypeAlias = Sequence[int]
 
-
-
-
 def strides_from_shape(shape: UserShape) -> UserStrides:
     layout = [1]
     offset = 1
@@ -35,6 +32,15 @@ def strides_from_shape(shape: UserShape) -> UserStrides:
         offset = s * offset
     return tuple(reversed(layout[:-1]))
 
+#------------------------------------------------------------------------------
+# A helper to compute a multi-index from a linear index.
+#------------------------------------------------------------------------------
+def _linear_to_multi_index(i: int, shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    idx = [0] * len(shape)
+    for p in range(len(shape) - 1, -1, -1):
+        idx[p] = i % shape[p]
+        i //= shape[p]
+    return tuple(idx)
 
 class TensorData:
     _storage: Storage
@@ -44,12 +50,10 @@ class TensorData:
     shape: UserShape
     dims: int
 
-    def __init__(
-        self,
-        storage: Union[Sequence[float], Storage],
-        shape: UserShape,
-        strides: Optional[UserStrides] = None,
-    ):
+    def __init__(self,
+                 storage: Union[Sequence[float], Storage],
+                 shape: UserShape,
+                 strides: Optional[UserStrides] = None):
         if isinstance(storage, np.ndarray):
             self._storage = storage
         else:
@@ -75,12 +79,6 @@ class TensorData:
             self._storage = numba.cuda.to_device(self._storage)
 
     def is_contiguous(self) -> bool:
-        """
-        Check that the layout is contiguous, i.e. outer dimensions have bigger strides than inner dimensions.
-
-        Returns:
-            bool : True if contiguous
-        """
         last = 1e9
         for stride in self._strides:
             if stride > last:
@@ -113,12 +111,10 @@ class TensorData:
         if isinstance(index, tuple):
             aindex = array(index)
 
-        # Pretend 0-dim shape is 1-dim shape of singleton
         shape = self.shape
         if len(shape) == 0 and len(aindex) != 0:
             shape = (1,)
 
-        # Check for errors
         if aindex.shape[0] != len(self.shape):
             raise RuntimeError(f"Indexing Error: Index {aindex} must be size of {self.shape}.")
         for i, ind in enumerate(aindex):
@@ -127,22 +123,14 @@ class TensorData:
             if ind < 0:
                 raise RuntimeError(f"Indexing Error: Negative indexing for {aindex} not supported.")
 
-        # Call fast indexing.
-        position = 0
+        pos = 0
         for ind, stride in zip(array(index), self._strides):
-            position += ind * stride
-        return position
+            pos += ind * stride
+        return pos
 
     def indices(self) -> Iterable[UserIndex]:
-        lshape: Shape = array(self.shape)
-        out_index: Index = array(self.shape)
         for i in range(self.size):
-            cur_ord = i
-            for idx in range(len(lshape) - 1, -1, -1):
-                sh = lshape[idx]
-                out_index[idx] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-            yield tuple(out_index)
+            yield _linear_to_multi_index(i, self.shape)
 
     def sample(self) -> UserIndex:
         return tuple((random.randint(0, s - 1) for s in self.shape))
@@ -158,26 +146,14 @@ class TensorData:
         return (self._storage, self._shape, self._strides)
 
     def permute(self, *order: int) -> TensorData:
-        """
-        Permute the dimensions of the tensor.
-
-        Args:
-            *order: a permutation of the dimensions
-
-        Returns:
-            New `TensorData` with the same storage and a new dimension order.
-        """
         assert list(sorted(order)) == list(
             range(len(self.shape))
         ), f"Must give a position to each dimension. Shape: {self.shape} Order: {order}"
-
-        # ASSIGN2.1
         return TensorData(
             self._storage,
             tuple([self.shape[o] for o in order]),
             tuple([self._strides[o] for o in order]),
         )
-        # END ASSIGN2.1
 
     def to_string(self) -> str:
         s = ""
