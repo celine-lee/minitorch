@@ -1,3 +1,4 @@
+
 from typing import Tuple
 
 import numpy as np
@@ -13,6 +14,21 @@ from .tensor_data import (
 )
 from .tensor_functions import Function
 
+# Numba helper functions for index computation in the JIT‐compiled convolution kernels.
+@njit
+def fill_index_numba(flat_index, shape, out_index):
+    cur = flat_index
+    for i in range(len(shape) - 1, -1, -1):
+        out_index[i] = cur % shape[i]
+        cur //= shape[i]
+
+@njit
+def compute_offset_numba(index, strides, length):
+    off = 0
+    for i in range(length):
+        off += index[i] * strides[i]
+    return off
+
 
 def _tensor_conv1d(
     out: Tensor,
@@ -27,37 +43,6 @@ def _tensor_conv1d(
     weight_strides: Strides,
     reverse: bool,
 ) -> None:
-    """
-    1D Convolution implementation.
-
-    Given input tensor of
-
-       `batch, in_channels, width`
-
-    and weight tensor
-
-       `out_channels, in_channels, k_width`
-
-    Computes padded output of
-
-       `batch, out_channels, width`
-
-    `reverse` decides if weight is anchored left (False) or right.
-    (See diagrams)
-
-    Args:
-        out (Storage): storage for `out` tensor.
-        out_shape (Shape): shape for `out` tensor.
-        out_strides (Strides): strides for `out` tensor.
-        out_size (int): size of the `out` tensor.
-        input (Storage): storage for `input` tensor.
-        input_shape (Shape): shape for `input` tensor.
-        input_strides (Strides): strides for `input` tensor.
-        weight (Storage): storage for `input` tensor.
-        weight_shape (Shape): shape for `input` tensor.
-        weight_strides (Strides): strides for `input` tensor.
-        reverse (bool): anchor weight at left or right
-    """
     batch_, out_channels, out_width = out_shape
     batch, in_channels, width = input_shape
     out_channels_, in_channels_, kw = weight_shape
@@ -70,36 +55,23 @@ def _tensor_conv1d(
     s1 = input_strides
     s2 = weight_strides
 
-    # ASSIGN4.1
     for i in prange(out_size):
-        out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        cur_ord = i + 0
-        for idx in range(len(out_shape) - 1, -1, -1):
-            sh = out_shape[idx]
-            out_index[idx] = int(cur_ord % sh)
-            cur_ord = cur_ord // sh
-        o = 0
-        for ind, stride in zip(out_index, out_strides):
-            o += ind * stride
+        out_index = np.zeros(MAX_DIMS, np.int16)
+        fill_index_numba(i, out_shape, out_index[:len(out_shape)])
+        o = compute_offset_numba(out_index, out_strides, len(out_shape))
 
-        # Iterate over batch, out_channel, width
-        b, oc, w = out_index[:3]
+        b, oc, w = out_index[0], out_index[1], out_index[2]
 
-        # Iterate over weights
         for dw in range(kw):
             iw = w + dw
             if reverse:
                 iw = w - dw
-            # Skip positions that go off edge.
             if iw < 0 or iw >= width:
                 continue
-
-            # Reduce over all in_channels
             for ic in range(in_channels):
                 term1 = input[s1[0] * b + s1[1] * ic + s1[2] * iw]
                 term2 = weight[s2[0] * oc + s2[1] * ic + s2[2] * dw]
                 out[o] += term1 * term2
-    # END ASSIGN4.1
 
 
 tensor_conv1d = njit(parallel=True)(_tensor_conv1d)
@@ -109,22 +81,13 @@ class Conv1dFun(Function):
     @staticmethod
     def forward(ctx: Context, input: Tensor, weight: Tensor) -> Tensor:
         """
-        Compute a 1D Convolution
-
-        Args:
-            ctx : Context
-            input : batch x in_channel x h x w
-            weight : out_channel x in_channel x kh x kw
-
-        Returns:
-            batch x out_channel x h x w
+        Compute a 1D convolution.
         """
         ctx.save_for_backward(input, weight)
         batch, in_channels, w = input.shape
         out_channels, in_channels2, kw = weight.shape
         assert in_channels == in_channels2
 
-        # Run convolution
         output = input.zeros((batch, out_channels, w))
         tensor_conv1d(
             *output.tuple(), output.size, *input.tuple(), *weight.tuple(), False
@@ -176,38 +139,6 @@ def _tensor_conv2d(
     weight_strides: Strides,
     reverse: bool,
 ) -> None:
-    """
-    2D Convolution implementation.
-
-    Given input tensor of
-
-       `batch, in_channels, height, width`
-
-    and weight tensor
-
-       `out_channels, in_channels, k_height, k_width`
-
-    Computes padded output of
-
-       `batch, out_channels, height, width`
-
-    `Reverse` decides if weight is anchored top-left (False) or bottom-right.
-    (See diagrams)
-
-
-    Args:
-        out (Storage): storage for `out` tensor.
-        out_shape (Shape): shape for `out` tensor.
-        out_strides (Strides): strides for `out` tensor.
-        out_size (int): size of the `out` tensor.
-        input (Storage): storage for `input` tensor.
-        input_shape (Shape): shape for `input` tensor.
-        input_strides (Strides): strides for `input` tensor.
-        weight (Storage): storage for `input` tensor.
-        weight_shape (Shape): shape for `input` tensor.
-        weight_strides (Strides): strides for `input` tensor.
-        reverse (bool): anchor weight at top-left or bottom-right
-    """
     batch_, out_channels, _, _ = out_shape
     batch, in_channels, height, width = input_shape
     out_channels_, in_channels_, kh, kw = weight_shape
@@ -220,29 +151,20 @@ def _tensor_conv2d(
 
     s1 = input_strides
     s2 = weight_strides
-    # inners
+
     s10, s11, s12, s13 = s1[0], s1[1], s1[2], s1[3]
     s20, s21, s22, s23 = s2[0], s2[1], s2[2], s2[3]
 
-    # ASSIGN4.2
     for i in prange(out_size):
-        out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        cur_ord = i + 0
-        for idx in range(len(out_shape) - 1, -1, -1):
-            sh = out_shape[idx]
-            out_index[idx] = int(cur_ord % sh)
-            cur_ord = cur_ord // sh
-        o = 0
-        for ind, stride in zip(out_index, out_strides):
-            o += ind * stride
+        out_index = np.zeros(MAX_DIMS, np.int16)
+        fill_index_numba(i, out_shape, out_index[:len(out_shape)])
+        o = compute_offset_numba(out_index, out_strides, len(out_shape))
 
-        b, oc, h, w = out_index[:4]
+        b, oc, h_idx, w = out_index[0], out_index[1], out_index[2], out_index[3]
         acc = 0.0
-        order = 1
-        if reverse:
-            order = -1
+        order = -1 if reverse else 1
         for dh in prange(kh):
-            ih = h + order * dh
+            ih = h_idx + order * dh
             if ih < 0 or ih >= height:
                 continue
             for dw in prange(kw):
@@ -256,7 +178,6 @@ def _tensor_conv2d(
                     inner1 += s11
                     inner2 += s21
         out[o] = acc
-    # END ASSIGN4.2
 
 
 tensor_conv2d = njit(parallel=True, fastmath=True)(_tensor_conv2d)
@@ -266,15 +187,7 @@ class Conv2dFun(Function):
     @staticmethod
     def forward(ctx: Context, input: Tensor, weight: Tensor) -> Tensor:
         """
-        Compute a 2D Convolution
-
-        Args:
-            ctx : Context
-            input : batch x in_channel x h x w
-            weight  : out_channel x in_channel x kh x kw
-
-        Returns:
-            (:class:`Tensor`) : batch x out_channel x h x w
+        Compute a 2D convolution.
         """
         ctx.save_for_backward(input, weight)
         batch, in_channels, h, w = input.shape

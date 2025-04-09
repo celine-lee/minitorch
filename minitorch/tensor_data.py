@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import random
@@ -13,7 +14,6 @@ from .operators import prod
 
 MAX_DIMS = 32
 
-
 Storage: TypeAlias = npt.NDArray[np.float64]
 OutIndex: TypeAlias = npt.NDArray[np.int32]
 Index: TypeAlias = npt.NDArray[np.int32]
@@ -23,8 +23,6 @@ Strides: TypeAlias = npt.NDArray[np.int32]
 UserIndex: TypeAlias = Sequence[int]
 UserShape: TypeAlias = Sequence[int]
 UserStrides: TypeAlias = Sequence[int]
-
-
 
 
 def strides_from_shape(shape: UserShape) -> UserStrides:
@@ -76,10 +74,7 @@ class TensorData:
 
     def is_contiguous(self) -> bool:
         """
-        Check that the layout is contiguous, i.e. outer dimensions have bigger strides than inner dimensions.
-
-        Returns:
-            bool : True if contiguous
+        Check that the layout is contiguous.
         """
         last = 1e9
         for stride in self._strides:
@@ -113,12 +108,10 @@ class TensorData:
         if isinstance(index, tuple):
             aindex = array(index)
 
-        # Pretend 0-dim shape is 1-dim shape of singleton
         shape = self.shape
         if len(shape) == 0 and len(aindex) != 0:
             shape = (1,)
 
-        # Check for errors
         if aindex.shape[0] != len(self.shape):
             raise RuntimeError(f"Indexing Error: Index {aindex} must be size of {self.shape}.")
         for i, ind in enumerate(aindex):
@@ -127,7 +120,6 @@ class TensorData:
             if ind < 0:
                 raise RuntimeError(f"Indexing Error: Negative indexing for {aindex} not supported.")
 
-        # Call fast indexing.
         position = 0
         for ind, stride in zip(array(index), self._strides):
             position += ind * stride
@@ -160,24 +152,16 @@ class TensorData:
     def permute(self, *order: int) -> TensorData:
         """
         Permute the dimensions of the tensor.
-
-        Args:
-            *order: a permutation of the dimensions
-
-        Returns:
-            New `TensorData` with the same storage and a new dimension order.
         """
         assert list(sorted(order)) == list(
             range(len(self.shape))
         ), f"Must give a position to each dimension. Shape: {self.shape} Order: {order}"
 
-        # ASSIGN2.1
         return TensorData(
             self._storage,
             tuple([self.shape[o] for o in order]),
             tuple([self._strides[o] for o in order]),
         )
-        # END ASSIGN2.1
 
     def to_string(self) -> str:
         s = ""

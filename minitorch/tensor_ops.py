@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable, Optional, Type
@@ -7,6 +8,7 @@ from typing_extensions import Protocol
 
 from . import operators
 from .tensor_data import MAX_DIMS
+from .tensor_helpers import fill_index, compute_offset, fill_broadcast_index
 
 if TYPE_CHECKING:
     from .tensor import Tensor
@@ -53,10 +55,8 @@ class TensorBackend:
         Args:
             ops : tensor operations object see `tensor_ops.py`
 
-
-        Returns :
+        Returns:
             A collection of tensor functions
-
         """
 
         # Maps
@@ -90,34 +90,8 @@ class SimpleOps(TensorOps):
     @staticmethod
     def map(fn: Callable[[float], float]) -> MapProto:
         """
-        Higher-order tensor map function ::
-
-          fn_map = map(fn)
-          fn_map(a, out)
-          out
-
-        Simple version::
-
-            for i:
-                for j:
-                    out[i, j] = fn(a[i, j])
-
-        Broadcasted version (`a` might be smaller than `out`) ::
-
-            for i:
-                for j:
-                    out[i, j] = fn(a[i, 0])
-
-        Args:
-            fn: function from float-to-float to apply.
-            a (:class:`TensorData`): tensor to map over
-            out (:class:`TensorData`): optional, tensor data to fill in,
-                   should broadcast with `a`
-
-        Returns:
-            new tensor data
+        Simple higher-order map for tensors.
         """
-
         f = tensor_map(fn)
 
         def ret(a: Tensor, out: Optional[Tensor] = None) -> Tensor:
@@ -129,40 +103,13 @@ class SimpleOps(TensorOps):
         return ret
 
     @staticmethod
-    def zip(
-        fn: Callable[[float, float], float]
-    ) -> Callable[["Tensor", "Tensor"], "Tensor"]:
+    def zip(fn: Callable[[float, float], float]) -> Callable[[Tensor, Tensor], Tensor]:
         """
-        Higher-order tensor zip function ::
-
-          fn_zip = zip(fn)
-          out = fn_zip(a, b)
-
-        Simple version ::
-
-            for i:
-                for j:
-                    out[i, j] = fn(a[i, j], b[i, j])
-
-        Broadcasted version (`a` and `b` might be smaller than `out`) ::
-
-            for i:
-                for j:
-                    out[i, j] = fn(a[i, 0], b[0, j])
-
-
-        Args:
-            fn: function from two floats-to-float to apply
-            a (:class:`TensorData`): tensor to zip over
-            b (:class:`TensorData`): tensor to zip over
-
-        Returns:
-            :class:`TensorData` : new tensor data
+        Simple higher-order zip (map2) for tensors.
         """
-
         f = tensor_zip(fn)
 
-        def ret(a: "Tensor", b: "Tensor") -> "Tensor":
+        def ret(a: Tensor, b: Tensor) -> Tensor:
             if a.shape != b.shape:
                 m = max(len(a.shape), len(b.shape))
                 c_rev = [0] * m
@@ -191,80 +138,37 @@ class SimpleOps(TensorOps):
     @staticmethod
     def reduce(
         fn: Callable[[float, float], float], start: float = 0.0
-    ) -> Callable[["Tensor", int], "Tensor"]:
+    ) -> Callable[[Tensor, int], Tensor]:
         """
-        Higher-order tensor reduce function. ::
-
-          fn_reduce = reduce(fn)
-          out = fn_reduce(a, dim)
-
-        Simple version ::
-
-            for j:
-                out[1, j] = start
-                for i:
-                    out[1, j] = fn(out[1, j], a[i, j])
-
-
-        Args:
-            fn: function from two floats-to-float to apply
-            a (:class:`TensorData`): tensor to reduce over
-            dim (int): int of dim to reduce
-
-        Returns:
-            :class:`TensorData` : new tensor
+        Simple higher-order reduction over a tensor.
         """
         f = tensor_reduce(fn)
 
-        def ret(a: "Tensor", dim: int) -> "Tensor":
+        def ret(a: Tensor, dim: int) -> Tensor:
             out_shape = list(a.shape)
             out_shape[dim] = 1
-
-            # Other values when not sum.
             out = a.zeros(tuple(out_shape))
             out._tensor._storage[:] = start
-
             f(*out.tuple(), *a.tuple(), dim)
             return out
 
         return ret
 
     @staticmethod
-    def matrix_multiply(a: "Tensor", b: "Tensor") -> "Tensor":
+    def matrix_multiply(a: Tensor, b: Tensor) -> Tensor:
         raise NotImplementedError("Not implemented in this assignment")
 
     is_cuda = False
 
 
-# Implementations.
-
+# Implementations
 
 def tensor_map(
     fn: Callable[[float], float]
 ) -> Callable[[Storage, Shape, Strides, Storage, Shape, Strides], None]:
     """
-    Low-level implementation of tensor map between
-    tensors with *possibly different strides*.
-
-    Simple version:
-
-    * Fill in the `out` array by applying `fn` to each
-      value of `in_storage` assuming `out_shape` and `in_shape`
-      are the same size.
-
-    Broadcasted version:
-
-    * Fill in the `out` array by applying `fn` to each
-      value of `in_storage` assuming `out_shape` and `in_shape`
-      broadcast. (`in_shape` must be smaller than `out_shape`).
-
-    Args:
-        fn: function from float-to-float to apply
-
-    Returns:
-        Tensor map function.
+    Low-level tensor_map implementation with broadcasting.
     """
-
     def _map(
         out: Storage,
         out_shape: Shape,
@@ -273,60 +177,29 @@ def tensor_map(
         in_shape: Shape,
         in_strides: Strides,
     ) -> None:
-        # ASSIGN2.3
-        out_index: Index = np.zeros(MAX_DIMS, np.int16)
-        in_index: Index = np.zeros(MAX_DIMS, np.int16)
+        # Allocate index arrays (will use only the first len(shape) elements)
+        out_index = np.zeros(MAX_DIMS, np.int16)
+        in_index = np.zeros(MAX_DIMS, np.int16)
         for i in range(len(out)):
-            cur_ord = i + 0
-            for idx in range(len(out_shape) - 1, -1, -1):
-                sh = out_shape[idx]
-                out_index[idx] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-            for s_i, s in enumerate(in_shape):
-                if s > 1:
-                    in_index[s_i] = out_index[s_i + (len(out_shape) - len(in_shape))]
-                else:
-                    in_index[s_i] = 0
-            o = 0
-            for ind, stride in zip(out_index, out_strides):
-                o += ind * stride
-            j = 0
-            for ind, stride in zip(in_index, in_strides):
-                j += ind * stride
+            fill_index(i, out_shape, out_index[:len(out_shape)])
+            fill_broadcast_index(out_index[:len(out_shape)], in_shape, in_index[:len(in_shape)])
+            o = compute_offset(out_index[:len(out_shape)], out_strides)
+            j = compute_offset(in_index[:len(in_shape)], in_strides)
             out[o] = fn(in_storage[j])
-        # END ASSIGN2.3
-
     return _map
 
 
 def tensor_zip(
     fn: Callable[[float, float], float]
 ) -> Callable[
-    [Storage, Shape, Strides, Storage, Shape, Strides, Storage, Shape, Strides], None
+    [Storage, Shape, Strides,
+     Storage, Shape, Strides,
+     Storage, Shape, Strides],
+    None
 ]:
     """
-    Low-level implementation of tensor zip between
-    tensors with *possibly different strides*.
-
-    Simple version:
-
-    * Fill in the `out` array by applying `fn` to each
-      value of `a_storage` and `b_storage` assuming `out_shape`
-      and `a_shape` are the same size.
-
-    Broadcasted version:
-
-    * Fill in the `out` array by applying `fn` to each
-      value of `a_storage` and `b_storage` assuming `a_shape`
-      and `b_shape` broadcast to `out_shape`.
-
-    Args:
-        fn: function mapping two floats to float to apply
-
-    Returns:
-        Tensor zip function.
+    Low-level tensor_zip implementation with broadcasting.
     """
-
     def _zip(
         out: Storage,
         out_shape: Shape,
@@ -338,38 +211,17 @@ def tensor_zip(
         b_shape: Shape,
         b_strides: Strides,
     ) -> None:
-        # ASSIGN2.3
-        out_index: Index = np.zeros(MAX_DIMS, np.int32)
-        a_index: Index = np.zeros(MAX_DIMS, np.int32)
-        b_index: Index = np.zeros(MAX_DIMS, np.int32)
+        out_index = np.zeros(MAX_DIMS, np.int32)
+        a_index = np.zeros(MAX_DIMS, np.int32)
+        b_index = np.zeros(MAX_DIMS, np.int32)
         for i in range(len(out)):
-            cur_ord = i
-            for idx in range(len(out_shape) - 1, -1, -1):
-                sh = out_shape[idx]
-                out_index[idx] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-            o = 0
-            for ind, stride in zip(out_index, out_strides):
-                o += ind * stride
-            for s_i, s in enumerate(a_shape):
-                if s > 1:
-                    a_index[s_i] = out_index[s_i + (len(out_shape) - len(a_shape))]
-                else:
-                    a_index[s_i] = 0
-            j = 0
-            for ind, stride in zip(a_index, a_strides):
-                j += ind * stride
-            for s_i, s in enumerate(b_shape):
-                if s > 1:
-                    b_index[s_i] = out_index[s_i + (len(out_shape) - len(b_shape))]
-                else:
-                    b_index[s_i] = 0
-            k = 0
-            for ind, stride in zip(b_index, b_strides):
-                k += ind * stride
+            fill_index(i, out_shape, out_index[:len(out_shape)])
+            fill_broadcast_index(out_index[:len(out_shape)], a_shape, a_index[:len(a_shape)])
+            fill_broadcast_index(out_index[:len(out_shape)], b_shape, b_index[:len(b_shape)])
+            o = compute_offset(out_index[:len(out_shape)], out_strides)
+            j = compute_offset(a_index[:len(a_shape)], a_strides)
+            k = compute_offset(b_index[:len(b_shape)], b_strides)
             out[o] = fn(a_storage[j], b_storage[k])
-        # END ASSIGN2.3
-
     return _zip
 
 
@@ -377,18 +229,8 @@ def tensor_reduce(
     fn: Callable[[float, float], float]
 ) -> Callable[[Storage, Shape, Strides, Storage, Shape, Strides, int], None]:
     """
-    Low-level implementation of tensor reduce.
-
-    * `out_shape` will be the same as `a_shape`
-       except with `reduce_dim` turned to size `1`
-
-    Args:
-        fn: reduction function mapping two floats to float
-
-    Returns:
-        Tensor reduce function.
+    Low-level tensor_reduce implementation.
     """
-
     def _reduce(
         out: Storage,
         out_shape: Shape,
@@ -398,27 +240,15 @@ def tensor_reduce(
         a_strides: Strides,
         reduce_dim: int,
     ) -> None:
-        # ASSIGN2.3
-        out_index: Index = np.zeros(MAX_DIMS, np.int32)
+        out_index = np.zeros(MAX_DIMS, np.int32)
         reduce_size = a_shape[reduce_dim]
         for i in range(len(out)):
-            cur_ord = i + 0
-            for idx in range(len(out_shape) - 1, -1, -1):
-                sh = out_shape[idx]
-                out_index[idx] = int(cur_ord % sh)
-                cur_ord = cur_ord // sh
-
-            o = 0
-            for ind, stride in zip(out_index, out_strides):
-                o += ind * stride
+            fill_index(i, out_shape, out_index[:len(out_shape)])
+            o = compute_offset(out_index[:len(out_shape)], out_strides)
             for s in range(reduce_size):
                 out_index[reduce_dim] = s
-                j = 0
-                for ind, stride in zip(out_index, a_strides):
-                    j += ind * stride
+                j = compute_offset(out_index[:len(a_shape)], a_strides)
                 out[o] = fn(out[o], a_storage[j])
-        # END ASSIGN2.3
-
     return _reduce
 
 
